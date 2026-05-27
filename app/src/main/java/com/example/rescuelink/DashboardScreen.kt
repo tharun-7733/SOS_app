@@ -11,12 +11,16 @@ import android.location.Location
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebSettings
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
-import com.google.android.gms.maps.model.CameraPosition
-import com.google.android.gms.maps.model.LatLng
-import com.google.maps.android.compose.GoogleMap
-import com.google.maps.android.compose.MapProperties
-import com.google.maps.android.compose.rememberCameraPositionState
+import com.google.android.gms.location.Priority
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -1090,8 +1094,87 @@ private fun QuickChip(text: String, onClick: () -> Unit) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  MAP SCREEN
+//  MAP SCREEN  (Leaflet.js via WebView — no API key required)
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** Returns a self-contained HTML page that renders a Leaflet.js map with live marker updates. */
+private fun buildLeafletHtml(lat: Double, lng: Double): String = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RescueLink Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #map { width: 100%; height: 100%; background: #0d0d0d; }
+    .leaflet-container { background: #1a1a1a !important; }
+    .leaflet-tile { filter: brightness(0.85) saturate(0.9) hue-rotate(5deg); }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(232,0,29,0.7), 0 0 8px #E8001D; }
+      70%  { box-shadow: 0 0 0 12px rgba(232,0,29,0), 0 0 8px #E8001D; }
+      100% { box-shadow: 0 0 0 0 rgba(232,0,29,0), 0 0 8px #E8001D; }
+    }
+    .live-dot {
+      width: 18px; height: 18px; border-radius: 50%;
+      background: #E8001D; border: 3px solid #fff;
+      animation: pulse 1.8s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    var map = L.map('map', { zoomControl: true, attributionControl: true })
+              .setView([$lat, $lng], 15);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      maxZoom: 19
+    }).addTo(map);
+
+    /* Live user location marker (pulsing dot) */
+    var userIcon = L.divIcon({
+      html: '<div class="live-dot"></div>',
+      iconSize: [18, 18], iconAnchor: [9, 9], className: ''
+    });
+    var userMarker = L.marker([$lat, $lng], { icon: userIcon })
+      .addTo(map)
+      .bindPopup('<b>📍 Your Live Location</b><br><span style="color:#E8001D;font-size:11px;">● LIVE GPS</span>', { maxWidth: 200 })
+      .openPopup();
+
+    /* Nearby sample markers (offset from initial coords) */
+    var mechIcon = L.divIcon({
+      html: '<div style="width:24px;height:24px;border-radius:6px;background:#1a2a1a;border:2px solid #22C55E;display:flex;align-items:center;justify-content:center;font-size:13px;">🔧</div>',
+      iconSize: [24, 24], iconAnchor: [12, 12], className: ''
+    });
+    var fuelIcon = L.divIcon({
+      html: '<div style="width:24px;height:24px;border-radius:6px;background:#1a1a2a;border:2px solid #3B82F6;display:flex;align-items:center;justify-content:center;font-size:13px;">⛽</div>',
+      iconSize: [24, 24], iconAnchor: [12, 12], className: ''
+    });
+
+    L.marker([$lat + 0.004, $lng - 0.005], { icon: mechIcon }).addTo(map)
+     .bindPopup('<b>🔧 Patel Auto Workshop</b><br>★★★★★ Open Now<br>~0.8 km away');
+    L.marker([$lat - 0.003, $lng + 0.006], { icon: mechIcon }).addTo(map)
+     .bindPopup('<b>🔧 Sharma Motors</b><br>★★★★☆ Open Now<br>~1.4 km away');
+    L.marker([$lat + 0.006, $lng + 0.004], { icon: fuelIcon }).addTo(map)
+     .bindPopup('<b>⛽ HP Petrol Pump</b><br>24 hrs • Open Now<br>~1.2 km away');
+
+    /**
+     * Called from Android via evaluateJavascript().
+     * Moves the live marker AND re-centres the map.
+     */
+    function setLocation(newLat, newLng) {
+      userMarker.setLatLng([newLat, newLng]);
+      map.setView([newLat, newLng], 15, { animate: true, duration: 0.5 });
+    }
+  </script>
+</body>
+</html>
+""".trimIndent()
+
 @Composable
 private fun MapScreen() {
     val context = LocalContext.current
@@ -1101,17 +1184,21 @@ private fun MapScreen() {
         )
     }
 
+    // Default coords: Ahmedabad, Gujarat (shown until GPS resolves)
+    var userLat by remember { mutableDoubleStateOf(23.0225) }
+    var userLng by remember { mutableDoubleStateOf(72.5714) }
+    var isLiveTracking by remember { mutableStateOf(false) }
+
+    // WebView reference so we can call JS bridge after location updates
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions(),
         onResult = { permissions ->
-            hasLocationPermission = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true || 
+            hasLocationPermission = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
                                     permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         }
     )
-
-    val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(LatLng(23.0225, 72.5714), 10f) // default to Ahmedabad
-    }
 
     LaunchedEffect(Unit) {
         if (!hasLocationPermission) {
@@ -1121,21 +1208,41 @@ private fun MapScreen() {
         }
     }
 
-    LaunchedEffect(hasLocationPermission) {
-        if (hasLocationPermission) {
-            try {
-                val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
-                fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
-                    if (location != null) {
-                        cameraPositionState.position = CameraPosition.fromLatLngZoom(
-                            LatLng(location.latitude, location.longitude), 
-                            15f
-                        )
-                    }
-                }
-            } catch (e: SecurityException) {
-                // Ignore if permission lost
+    // Start live location updates whenever permission is granted; stop on dispose
+    DisposableEffect(hasLocationPermission) {
+        if (!hasLocationPermission) return@DisposableEffect onDispose {}
+
+        val fusedClient: FusedLocationProviderClient =
+            LocationServices.getFusedLocationProviderClient(context)
+
+        val locationRequest = LocationRequest.Builder(
+            Priority.PRIORITY_HIGH_ACCURACY, 3_000L   // update every 3 s
+        ).setMinUpdateIntervalMillis(1_500L)           // but no faster than 1.5 s
+         .build()
+
+        val locationCallback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                val location = result.lastLocation ?: return
+                userLat = location.latitude
+                userLng  = location.longitude
+                isLiveTracking = true
+                // Push new coords into Leaflet via JS bridge
+                webViewRef?.evaluateJavascript(
+                    "setLocation(${location.latitude}, ${location.longitude})", null
+                )
             }
+        }
+
+        try {
+            fusedClient.requestLocationUpdates(
+                locationRequest,
+                locationCallback,
+                android.os.Looper.getMainLooper()
+            )
+        } catch (_: SecurityException) { /* permission revoked mid-session */ }
+
+        onDispose {
+            fusedClient.removeLocationUpdates(locationCallback)
         }
     }
 
@@ -1143,30 +1250,97 @@ private fun MapScreen() {
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column {
-            Text("Map & Navigation", fontFamily = OutfitFontFamily, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
-            Text("Locate nearby assistance", fontFamily = OutfitFontFamily, fontSize = 11.sp, color = DashboardTokens.White60)
+        // Header row with live badge
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text("Map & Navigation", fontFamily = OutfitFontFamily, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Color.White)
+                Text("Locate nearby assistance", fontFamily = OutfitFontFamily, fontSize = 11.sp, color = DashboardTokens.White60)
+            }
+            if (isLiveTracking) {
+                val pulse = rememberInfiniteTransition(label = "livePulse")
+                val alpha by pulse.animateFloat(
+                    initialValue = 1f, targetValue = 0.3f,
+                    animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
+                    label = "livePulseAlpha"
+                )
+                Box(
+                    modifier = Modifier
+                        .background(DashboardTokens.RedDim, RoundedCornerShape(100.dp))
+                        .border(1.dp, DashboardTokens.RedMid, RoundedCornerShape(100.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Box(Modifier.size(7.dp).background(DashboardTokens.RedHot.copy(alpha = alpha), CircleShape))
+                        Text("LIVE", fontFamily = OutfitFontFamily, fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = DashboardTokens.RedHot)
+                    }
+                }
+            }
         }
-        Box(modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(16.dp)).border(1.dp, DashboardTokens.Rim, RoundedCornerShape(16.dp))) {
-            GoogleMap(
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, DashboardTokens.Rim, RoundedCornerShape(16.dp))
+        ) {
+            // Leaflet.js WebView
+            AndroidView(
                 modifier = Modifier.fillMaxSize(),
-                cameraPositionState = cameraPositionState,
-                properties = MapProperties(isMyLocationEnabled = hasLocationPermission)
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        webViewRef = this
+                        webViewClient = WebViewClient()
+                        settings.apply {
+                            javaScriptEnabled   = true
+                            domStorageEnabled   = true
+                            cacheMode           = WebSettings.LOAD_NO_CACHE
+                            setSupportZoom(true)
+                            builtInZoomControls = true
+                            displayZoomControls = false
+                        }
+                        setBackgroundColor(android.graphics.Color.parseColor("#0d0d0d"))
+                        loadDataWithBaseURL(
+                            "https://rescuelink.app",
+                            buildLeafletHtml(userLat, userLng),
+                            "text/html",
+                            "UTF-8",
+                            null
+                        )
+                    }
+                },
+                update = { wv -> webViewRef = wv }
             )
+
+            // Status overlay at bottom
             Box(
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(0.85f))))
                     .padding(14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Rounded.LocationOn, null, tint = DashboardTokens.RedHot, modifier = Modifier.size(14.dp))
                     Spacer(Modifier.width(5.dp))
-                    Text("Live GPS Location Enabled", fontFamily = OutfitFontFamily, fontSize = 11.sp, color = Color.White)
+                    Text(
+                        when {
+                            isLiveTracking        -> "Live GPS — %.5f, %.5f".format(userLat, userLng)
+                            hasLocationPermission -> "Acquiring GPS signal…"
+                            else                  -> "Map — OpenStreetMap"
+                        },
+                        fontFamily = OutfitFontFamily, fontSize = 11.sp, color = Color.White
+                    )
                     Spacer(Modifier.weight(1f))
-                    Text("Expand", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.RedHot, fontWeight = FontWeight.Bold)
+                    Text("Leaflet.js", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.RedHot, fontWeight = FontWeight.Bold)
                 }
             }
         }
+
         SectionHeader("Nearby Assistance", "See All")
         Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ServiceCard("Mechanics", Icons.Rounded.Build,           DashboardTokens.Orange, "3 nearby")
