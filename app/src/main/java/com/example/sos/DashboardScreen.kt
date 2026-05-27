@@ -1419,94 +1419,417 @@ private fun CommunityPostCard(post: CommunityPost, onLike: () -> Unit) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  AI CHAT SCREEN
+//  AI CHAT SCREEN  — redesigned with formatted output & premium UI
 // ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Renders a single run of text, applying bold styling to **..** segments
+ * and coloring emoji-prefixed lines with a subtle accent.
+ */
+@Composable
+private fun FormattedMessageText(raw: String, isUser: Boolean) {
+    val baseColor    = Color.White
+    val dimColor     = if (isUser) Color.White.copy(0.85f) else DashboardTokens.White80
+    val accentColor  = if (isUser) Color.White else DashboardTokens.RedHot
+
+    // Split into lines, render each
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        raw.lines().forEach { line ->
+            val isBullet  = line.trimStart().startsWith("•")
+            val trimmed   = line.trimStart()
+
+            // Build annotated string for bold segments
+            val annotated = buildAnnotatedStringWithBold(
+                text        = line,
+                boldColor   = accentColor,
+                normalColor = if (isBullet) dimColor else baseColor
+            )
+
+            Row(verticalAlignment = Alignment.Top) {
+                Text(
+                    text       = annotated,
+                    fontSize   = 13.sp,
+                    lineHeight = 20.sp,
+                    fontFamily = OutfitFontFamily,
+                    modifier   = if (isBullet) Modifier.padding(start = 4.dp) else Modifier
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Builds an AnnotatedString that bolds any text wrapped in ** ** markers.
+ */
+fun buildAnnotatedStringWithBold(
+    text: String,
+    boldColor: Color,
+    normalColor: Color
+): androidx.compose.ui.text.AnnotatedString {
+    val builder = androidx.compose.ui.text.AnnotatedString.Builder()
+    val pattern = Regex("""\*\*(.+?)\*\*""")
+    var lastIndex = 0
+    pattern.findAll(text).forEach { match ->
+        // Append normal text before this match
+        if (match.range.first > lastIndex) {
+            builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = normalColor))
+            builder.append(text.substring(lastIndex, match.range.first))
+            builder.pop()
+        }
+        // Append bold text
+        builder.pushStyle(
+            androidx.compose.ui.text.SpanStyle(
+                color      = boldColor,
+                fontWeight = FontWeight.Bold
+            )
+        )
+        builder.append(match.groupValues[1])
+        builder.pop()
+        lastIndex = match.range.last + 1
+    }
+    // Append any remaining normal text
+    if (lastIndex < text.length) {
+        builder.pushStyle(androidx.compose.ui.text.SpanStyle(color = normalColor))
+        builder.append(text.substring(lastIndex))
+        builder.pop()
+    }
+    return builder.toAnnotatedString()
+}
+
+/** Animated three-dot typing indicator for when the AI is generating. */
+@Composable
+private fun TypingIndicator() {
+    val inf = rememberInfiniteTransition(label = "typing")
+    val d1 by inf.animateFloat(0.3f, 1f, infiniteRepeatable(tween(500, easing = FastOutSlowInEasing), RepeatMode.Reverse, initialStartOffset = StartOffset(0)),   "d1")
+    val d2 by inf.animateFloat(0.3f, 1f, infiniteRepeatable(tween(500, easing = FastOutSlowInEasing), RepeatMode.Reverse, initialStartOffset = StartOffset(150)), "d2")
+    val d3 by inf.animateFloat(0.3f, 1f, infiniteRepeatable(tween(500, easing = FastOutSlowInEasing), RepeatMode.Reverse, initialStartOffset = StartOffset(300)), "d3")
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        // Avatar
+        Box(
+            modifier = Modifier.size(28.dp)
+                .background(
+                    Brush.linearGradient(listOf(DashboardTokens.RedDeep, DashboardTokens.RedHot)),
+                    CircleShape
+                )
+                .border(1.dp, DashboardTokens.RedMid, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = Color.White, modifier = Modifier.size(13.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .background(DashboardTokens.CardBg3, RoundedCornerShape(topStart = 2.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 14.dp))
+                .border(1.dp, DashboardTokens.Rim2, RoundedCornerShape(topStart = 2.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 14.dp))
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                listOf(d1, d2, d3).forEach { alpha ->
+                    Box(Modifier.size(6.dp).graphicsLayer { this.alpha = alpha }.background(DashboardTokens.RedHot, CircleShape))
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AiChatScreen(chatVm: ChatViewModel = viewModel()) {
-    val messages = chatVm.chatMessages
-    var input by remember { mutableStateOf("") }
+    val messages  = chatVm.chatMessages
+    val isTyping  = chatVm.isTyping.value
+    var input     by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    var showSuggestions by remember { mutableStateOf(true) }
+
+    // Auto-scroll to newest message
+    LaunchedEffect(messages.size, isTyping) {
+        listState.animateScrollToItem(0)
+    }
+
+    val inf = rememberInfiniteTransition(label = "headerPulse")
+    val pulseAlpha by inf.animateFloat(0.6f, 1f, infiniteRepeatable(tween(1800), RepeatMode.Reverse), "pulse")
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth()
-                .background(Color(0xD9060608))
-                .drawBehind { drawLine(DashboardTokens.Rim, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx()) }
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.size(38.dp).background(DashboardTokens.RedDim, CircleShape).border(1.dp, DashboardTokens.RedMid, CircleShape),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = DashboardTokens.RedHot, modifier = Modifier.size(18.dp)) }
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text("AI Emergency Assistant", fontFamily = OutfitFontFamily, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                Text("Online · Responds instantly", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.Green)
-            }
-            Spacer(Modifier.weight(1f))
-            Text("History", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.RedHot, fontWeight = FontWeight.Bold)
-        }
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).padding(horizontal = 14.dp),
-            reverseLayout = true,
-            contentPadding = PaddingValues(vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
+        // ── Premium glassmorphism header ──────────────────────────────────
+        Box(
+            modifier = Modifier.fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF0A0007), DashboardTokens.BlackCore)
+                    )
+                )
+                .drawBehind {
+                    drawLine(DashboardTokens.RedMid, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx())
+                }
+                .padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
-            items(messages.reversed()) { msg ->
-                val isAi = !msg.isUser
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isAi) Arrangement.Start else Arrangement.End) {
-                    if (isAi) {
-                        Box(modifier = Modifier.size(26.dp).background(DashboardTokens.RedDim, CircleShape), contentAlignment = Alignment.Center) {
-                            Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = DashboardTokens.RedHot, modifier = Modifier.size(13.dp))
-                        }
-                        Spacer(Modifier.width(7.dp))
-                    }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Animated TARS avatar
+                Box(contentAlignment = Alignment.Center) {
+                    // Outer glow ring
                     Box(
-                        modifier = Modifier.widthIn(max = 240.dp)
+                        modifier = Modifier.size(52.dp).graphicsLayer { alpha = pulseAlpha * 0.4f }
+                            .background(Brush.radialGradient(listOf(DashboardTokens.RedHot, Color.Transparent)), CircleShape)
+                    )
+                    Box(
+                        modifier = Modifier.size(44.dp)
                             .background(
-                                if (isAi) DashboardTokens.CardBg3 else DashboardTokens.RedHot,
-                                RoundedCornerShape(topStart = if (isAi) 2.dp else 12.dp, topEnd = if (isAi) 12.dp else 2.dp, bottomStart = 12.dp, bottomEnd = 12.dp)
+                                Brush.linearGradient(listOf(Color(0xFF2A0010), DashboardTokens.RedDeep)),
+                                CircleShape
                             )
-                            .border(1.dp, if (isAi) DashboardTokens.Rim2 else Color.Transparent,
-                                RoundedCornerShape(topStart = if (isAi) 2.dp else 12.dp, topEnd = if (isAi) 12.dp else 2.dp, bottomStart = 12.dp, bottomEnd = 12.dp))
-                            .padding(10.dp)
-                    ) { Text(msg.text, fontFamily = OutfitFontFamily, fontSize = 12.sp, color = Color.White, lineHeight = 18.sp) }
+                            .border(1.5.dp, DashboardTokens.RedHot.copy(0.7f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "TARS",
+                        fontFamily    = BebasNeueFontFamily,
+                        fontSize      = 22.sp,
+                        letterSpacing = 2.sp,
+                        style         = TextStyle(brush = Brush.linearGradient(listOf(Color.White, DashboardTokens.RedGlow)))
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Box(Modifier.size(6.dp).graphicsLayer { alpha = pulseAlpha }.background(DashboardTokens.Green, CircleShape))
+                        Text(
+                            if (isTyping) "Generating response…" else "AI Emergency Assistant · Online",
+                            fontFamily = OutfitFontFamily, fontSize = 10.sp,
+                            color = if (isTyping) DashboardTokens.Orange else DashboardTokens.Green
+                        )
+                    }
+                }
+                // Clear chat pill
+                Box(
+                    modifier = Modifier
+                        .background(DashboardTokens.CardBg3, RoundedCornerShape(100.dp))
+                        .border(1.dp, DashboardTokens.Rim2, RoundedCornerShape(100.dp))
+                        .clickable {
+                            chatVm.chatMessages.clear()
+                            chatVm.chatMessages.add(
+                                Message("Hi! I'm **TARS**, your AI emergency road assistant. How can I help you today?\n\n**I can help with:**\n• Emergency SOS guidance\n• Road hazard information\n• Vehicle troubleshooting\n• Route assistance & navigation tips", false)
+                            )
+                            showSuggestions = true
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text("New Chat", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.White60, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
 
-        // Input bar
-        Row(
-            modifier = Modifier.fillMaxWidth()
-                .background(DashboardTokens.CardBg)
-                .drawBehind { drawLine(DashboardTokens.Rim, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // ── Message list ──────────────────────────────────────────────────
+        LazyColumn(
+            state             = listState,
+            modifier          = Modifier.weight(1f).padding(horizontal = 14.dp),
+            reverseLayout     = true,
+            contentPadding    = PaddingValues(vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            OutlinedTextField(
-                value = input, onValueChange = { input = it },
-                placeholder = { Text("Ask anything...", fontSize = 12.sp, color = DashboardTokens.White35) },
-                modifier = Modifier.weight(1f).height(46.dp),
-                textStyle = TextStyle(fontFamily = OutfitFontFamily, fontSize = 12.sp, color = Color.White),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor   = DashboardTokens.CardBg3,
-                    unfocusedContainerColor = DashboardTokens.CardBg3,
-                    focusedBorderColor      = DashboardTokens.RedHot,
-                    unfocusedBorderColor    = DashboardTokens.Rim2
-                ),
-                shape = RoundedCornerShape(12.dp), singleLine = true
-            )
-            Spacer(Modifier.width(8.dp))
-            Box(
-                modifier = Modifier.size(46.dp)
-                    .background(Brush.linearGradient(listOf(DashboardTokens.RedHot, DashboardTokens.RedDeep)), RoundedCornerShape(12.dp))
-                    .clickable { if (input.isNotBlank()) { chatVm.sendMessage(input); input = "" } },
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.AutoMirrored.Rounded.Send, null, tint = Color.White, modifier = Modifier.size(18.dp)) }
+            // Typing indicator (shown at top since reverseLayout = true)
+            if (isTyping) {
+                item { TypingIndicator() }
+            }
+
+            items(messages.reversed()) { msg ->
+                val isAi = !msg.isUser
+                val enterAnim = fadeIn(tween(300)) + slideInVertically(tween(300)) { it / 3 }
+
+                AnimatedVisibility(visible = true, enter = enterAnim) {
+                    if (isAi) {
+                        // ── AI bubble ──
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start, verticalAlignment = Alignment.Top) {
+                            Box(
+                                modifier = Modifier.size(28.dp)
+                                    .background(
+                                        Brush.linearGradient(listOf(DashboardTokens.RedDeep, DashboardTokens.RedHot)),
+                                        CircleShape
+                                    )
+                                    .border(1.dp, DashboardTokens.RedMid, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Chat, null, tint = Color.White, modifier = Modifier.size(13.dp))
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Box(
+                                    modifier = Modifier
+                                        .background(
+                                            Brush.linearGradient(
+                                                listOf(Color(0xFF17121A), DashboardTokens.CardBg3),
+                                                start = Offset.Zero, end = Offset(0f, Float.POSITIVE_INFINITY)
+                                            ),
+                                            RoundedCornerShape(topStart = 2.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
+                                        )
+                                        .border(
+                                            1.dp,
+                                            Brush.linearGradient(listOf(DashboardTokens.RedMid.copy(0.4f), DashboardTokens.Rim2)),
+                                            RoundedCornerShape(topStart = 2.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
+                                        )
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    FormattedMessageText(raw = msg.text, isUser = false)
+                                }
+                                Spacer(Modifier.height(3.dp))
+                                Text("TARS · just now", fontFamily = OutfitFontFamily, fontSize = 9.sp, color = DashboardTokens.White35, modifier = Modifier.padding(start = 4.dp))
+                            }
+                        }
+                    } else {
+                        // ── User bubble ──
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.Top) {
+                            Column(horizontalAlignment = Alignment.End) {
+                                Box(
+                                    modifier = Modifier
+                                        .widthIn(max = 260.dp)
+                                        .background(
+                                            Brush.linearGradient(listOf(DashboardTokens.RedHot, DashboardTokens.RedDeep)),
+                                            RoundedCornerShape(topStart = 16.dp, topEnd = 2.dp, bottomStart = 16.dp, bottomEnd = 16.dp)
+                                        )
+                                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                                ) {
+                                    FormattedMessageText(raw = msg.text, isUser = true)
+                                }
+                                Spacer(Modifier.height(3.dp))
+                                Text("You · just now", fontFamily = OutfitFontFamily, fontSize = 9.sp, color = DashboardTokens.White35, modifier = Modifier.padding(end = 4.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Quick suggestion chips ────────────────────────────────────────
+        AnimatedVisibility(
+            visible = showSuggestions && messages.size <= 1,
+            enter   = fadeIn(tween(300)) + expandVertically(tween(300)),
+            exit    = fadeOut(tween(200)) + shrinkVertically(tween(200))
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(DashboardTokens.BlackCore)
+                    .drawBehind { drawLine(DashboardTokens.Rim, Offset(0f, 0f), Offset(size.width, 0f), 0.5.dp.toPx()) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Quick Actions", fontFamily = OutfitFontFamily, fontSize = 10.sp, color = DashboardTokens.White35, fontWeight = FontWeight.SemiBold, letterSpacing = 0.8.sp)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    chatVm.suggestions.forEach { suggestion ->
+                        Box(
+                            modifier = Modifier
+                                .background(DashboardTokens.CardBg3, RoundedCornerShape(100.dp))
+                                .border(1.dp, DashboardTokens.Rim2, RoundedCornerShape(100.dp))
+                                .clickable {
+                                    showSuggestions = false
+                                    chatVm.sendMessage(suggestion)
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp)
+                        ) {
+                            Text(suggestion, fontFamily = OutfitFontFamily, fontSize = 11.sp, color = DashboardTokens.White80, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Premium input bar ─────────────────────────────────────────────
+        Box(
+            modifier = Modifier.fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(listOf(DashboardTokens.BlackCore, Color(0xFF0A0007)))
+                )
+                .drawBehind { drawLine(DashboardTokens.RedMid.copy(0.4f), Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx()) }
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value         = input,
+                    onValueChange = { input = it },
+                    placeholder   = {
+                        Text(
+                            "Ask TARS anything…",
+                            fontFamily = OutfitFontFamily,
+                            fontSize   = 13.sp,
+                            color      = DashboardTokens.White35
+                        )
+                    },
+                    modifier      = Modifier.weight(1f).heightIn(min = 50.dp),
+                    textStyle     = TextStyle(fontFamily = OutfitFontFamily, fontSize = 13.sp, color = Color.White, lineHeight = 20.sp),
+                    colors        = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor   = DashboardTokens.CardBg3,
+                        unfocusedContainerColor = Color(0xFF0F0F14),
+                        focusedBorderColor      = DashboardTokens.RedHot,
+                        unfocusedBorderColor    = DashboardTokens.Rim2
+                    ),
+                    shape    = RoundedCornerShape(16.dp),
+                    maxLines = 4,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        imeAction = androidx.compose.ui.text.input.ImeAction.Send
+                    ),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                        onSend = {
+                            if (input.isNotBlank() && !isTyping) {
+                                showSuggestions = false
+                                chatVm.sendMessage(input)
+                                input = ""
+                            }
+                        }
+                    )
+                )
+                Spacer(Modifier.width(10.dp))
+                // Send button — animated when active
+                val sendScale by animateFloatAsState(
+                    targetValue = if (input.isNotBlank() && !isTyping) 1f else 0.85f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                    label = "sendScale"
+                )
+                Box(
+                    modifier = Modifier.size(50.dp)
+                        .graphicsLayer { scaleX = sendScale; scaleY = sendScale }
+                        .background(
+                            if (input.isNotBlank() && !isTyping)
+                                Brush.linearGradient(listOf(DashboardTokens.RedHot, DashboardTokens.RedDeep))
+                            else
+                                Brush.linearGradient(listOf(DashboardTokens.CardBg3, DashboardTokens.CardBg2)),
+                            RoundedCornerShape(14.dp)
+                        )
+                        .border(
+                            1.dp,
+                            if (input.isNotBlank() && !isTyping) Color.Transparent else DashboardTokens.Rim2,
+                            RoundedCornerShape(14.dp)
+                        )
+                        .clickable(enabled = input.isNotBlank() && !isTyping) {
+                            showSuggestions = false
+                            chatVm.sendMessage(input)
+                            input = ""
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isTyping) {
+                        CircularProgressIndicator(
+                            color       = DashboardTokens.RedHot,
+                            modifier    = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.Send,
+                            null,
+                            tint     = if (input.isNotBlank()) Color.White else DashboardTokens.White35,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

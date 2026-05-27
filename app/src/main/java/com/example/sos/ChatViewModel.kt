@@ -1,6 +1,7 @@
 package com.example.sos
 
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.sos.BuildConfig
@@ -30,25 +31,51 @@ data class Message(val text: String, val isUser: Boolean)
  * • All network work runs on Dispatchers.IO via viewModelScope.launch to keep
  *   the main thread free.
  * • State (chatMessages) is a SnapshotStateList updated only on the main
- *   dispatcher (withContext(Dispatchers.Main) is implicit via snapshotStateList
- *   inside viewModelScope).
+ *   dispatcher.
  */
 class ChatViewModel : ViewModel() {
 
     val chatMessages = mutableStateListOf(
-        Message("Hi! I'm Tars. How can I assist you today?", false)
+        Message("Hi! I'm **TARS**, your AI emergency road assistant. How can I help you today?\n\n**I can help with:**\n• Emergency SOS guidance\n• Road hazard information\n• Vehicle troubleshooting\n• Route assistance & navigation tips", false)
     )
+
+    /** True while the AI is generating a response — drives the typing indicator. */
+    val isTyping = mutableStateOf(false)
+
+    /** Quick suggestion chips shown above the input bar. */
+    val suggestions = listOf(
+        "🚨 SOS Emergency",
+        "🔧 Car breakdown help",
+        "🏥 Nearest hospital",
+        "🚧 Report road hazard"
+    )
+
+    private val systemInstruction = """
+        You are TARS, an AI emergency road assistant inside the RescueLink app.
+        Your responses MUST follow this structured format:
+
+        1. Use **bold** (double asterisks) for key terms, action items, and section headings.
+        2. Use bullet points (•) for lists of steps or options.
+        3. Keep responses concise and action-oriented — max 5 bullet points per section.
+        4. For emergencies, always start with a ⚠️ or 🚨 emoji header.
+        5. For helpful tips, use 💡 before the tip.
+        6. For locations or distances, use 📍.
+        7. End every response with a short follow-up question or offer for more help.
+        8. Never use markdown headers like # or ##. Use bold text instead.
+        9. Use line breaks between sections for readability.
+    """.trimIndent()
 
     fun sendMessage(userMessage: String) {
         if (userMessage.isBlank()) return
 
         chatMessages.add(Message(userMessage, true))
+        isTyping.value = true
 
         viewModelScope.launch(Dispatchers.IO) {
             val reply = runCatching {
                 val request = GeminiRequest(
                     contents = listOf(
-                        GeminiContent(parts = listOf(GeminiPart(userMessage)))
+                        GeminiContent(parts = listOf(GeminiPart(systemInstruction + "\n\nUser: " + userMessage)))
                     )
                 )
 
@@ -67,10 +94,11 @@ class ChatViewModel : ViewModel() {
                     ?: "I'm sorry, I couldn't generate a response."
 
             }.getOrElse { e ->
-                "Error: ${e.localizedMessage}"
+                "⚠️ **Connection Error**\n\nI couldn't reach my servers right now.\n\n• Check your internet connection\n• Try again in a moment\n\nError: ${e.localizedMessage}"
             }
 
             withContext(Dispatchers.Main) {
+                isTyping.value = false
                 chatMessages.add(Message(reply, false))
             }
         }
